@@ -227,7 +227,11 @@ def process_video(
 
         if callback_url:
             print(f"[JOB {video_id}] Sending callback to Laravel", flush=True)
-            requests.post(callback_url, json=payload, timeout=30)
+            response = requests.post(callback_url, json=payload, timeout=30)
+
+        print(f"[JOB {video_id}] Callback URL: {callback_url}", flush=True)
+        print(f"[JOB {video_id}] Callback status: {response.status_code}", flush=True)
+        print(f"[JOB {video_id}] Callback response: {response.text}", flush=True)
 
         print(f"[JOB {video_id}] Subtitle job completed successfully", flush=True)
 

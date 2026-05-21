@@ -24,3 +24,17 @@ curl -X POST "http://127.0.0.1:8001/generate-subtitles" ^
 -H "Content-Type: application/json" ^
 -H "X-API-KEY: 7baf3f5d9a8e4c1a9d7f6e2b4a1c8f3" ^
 -d "{\"video_id\":3,\"gcs_video_path\":\"tenants/ee7c0081-615e-43d7-9c01-dc503d8d89e4/Video/model_a0fb9c22-ceb0-4439-8ef3-1afdb57305c4/videoplayback(4)-d249e906-9e7d-4bd2-a473-a0a4866af7f2.mp4\",\"source_language\":\"en\"}"
+
+
+https://worker.abdullah-alanazi.sa/health
+venv\Scripts\activate
+uvicorn main:app --host 127.0.0.1 --port 8090
+
+
+
+sudo systemctl daemon-reload
+sudo systemctl restart lms-subtitle-worker
+sudo systemctl restart lms-subtitle-worker
+sudo journalctl -u lms-subtitle-worker -f
+
+
