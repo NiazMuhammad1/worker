@@ -34,7 +34,15 @@ uvicorn main:app --host 127.0.0.1 --port 8090
 
 sudo systemctl daemon-reload
 sudo systemctl restart lms-subtitle-worker
+
+
 sudo systemctl restart lms-subtitle-worker
 sudo journalctl -u lms-subtitle-worker -f
 
 
+
+
+curl -X POST "https://worker.abdullah-alanazi.sa/generate-subtitles" ^
+-H "Content-Type: application/json" ^
+-H "X-API-KEY: 7baf3f5d9a8e4c1a9d7f6e2b4a1c8f3" ^
+-d "{\"video_id\":\"a1d5321f-4385-4dba-8d9b-20a12710ea26\",\"gcs_video_path\":\"tenants/ecf18c10-9348-4d2f-ac26-d7f0d2dcd227/Video/model_a1d5321f-4385-4dba-8d9b-20a12710ea26/upload-7b5aba8c-60d7-4ade-b65c-3405af11584b.bin\",\"callback_url\":\"https://njd.abdullah-alanazi.sa/api/subtitle-callback\",\"source_language\":\"en\"}"
