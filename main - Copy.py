@@ -44,7 +44,7 @@ def verify_api_key(x_api_key: str):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def install_argos_language_package(from_code: str = "en", to_code: str = "ar"):
+def install_argos_language_package(from_code: str = "ar", to_code: str = "en"):
     installed_languages = argostranslate.translate.get_installed_languages()
 
     for lang in installed_languages:
@@ -52,6 +52,8 @@ def install_argos_language_package(from_code: str = "en", to_code: str = "ar"):
             for translation in lang.translations_from:
                 if translation.to_lang.code == to_code:
                     return
+
+    print(f"Installing Argos package: {from_code} -> {to_code}", flush=True)
 
     argostranslate.package.update_package_index()
     available_packages = argostranslate.package.get_available_packages()
@@ -70,8 +72,10 @@ def install_argos_language_package(from_code: str = "en", to_code: str = "ar"):
     package_path = package_to_install.download()
     argostranslate.package.install_from_path(package_path)
 
+    print("Argos package installed successfully", flush=True)
 
-def translate_text(text: str, from_code: str = "en", to_code: str = "ar") -> str:
+
+def translate_text(text: str, from_code: str = "ar", to_code: str = "en") -> str:
     if not text.strip():
         return ""
 
@@ -123,6 +127,13 @@ def write_vtt(segments: List[Dict], output_path: str, rtl: bool = False):
     with open(output_path, "w", encoding="utf-8") as file:
         file.write("WEBVTT\n\n")
 
+        if rtl:
+            file.write("STYLE\n")
+            file.write("::cue(.arabic) {\n")
+            file.write("  direction: rtl;\n")
+            file.write("  unicode-bidi: plaintext;\n")
+            file.write("}\n\n")
+
         for segment in segments:
             start = format_timestamp(segment["start"])
             end = format_timestamp(segment["end"])
@@ -148,76 +159,104 @@ def process_video(
 
     if model is None:
         print(f"[JOB {video_id}] Loading Whisper model: {WHISPER_MODEL}", flush=True)
+
         model = WhisperModel(
             WHISPER_MODEL,
             device=WHISPER_DEVICE,
             compute_type=WHISPER_COMPUTE_TYPE
         )
+
         print(f"[JOB {video_id}] Whisper model loaded", flush=True)
 
     job_uuid = str(uuid.uuid4())
+
     work_dir = Path("tmp") / job_uuid
     work_dir.mkdir(parents=True, exist_ok=True)
 
     local_video = str(work_dir / "video.mp4")
     local_audio = str(work_dir / "audio.wav")
+
     english_vtt = str(work_dir / "subtitles_en.vtt")
     arabic_vtt = str(work_dir / "subtitles_ar.vtt")
 
     try:
-        print(f"[JOB {video_id}] Checking Argos EN to AR package", flush=True)
-        install_argos_language_package("en", "ar")
+        print(f"[JOB {video_id}] Installing/checking Argos AR -> EN package", flush=True)
+
+        install_argos_language_package("ar", "en")
 
         print(f"[JOB {video_id}] Downloading video from GCS: {gcs_video_path}", flush=True)
+
         download_from_gcs(gcs_video_path, local_video)
 
         print(f"[JOB {video_id}] Extracting audio with FFmpeg", flush=True)
+
         extract_audio(local_video, local_audio)
 
-        print(f"[JOB {video_id}] Running Whisper transcription", flush=True)
+        print(f"[JOB {video_id}] Running Whisper transcription in Arabic", flush=True)
+
         whisper_segments, info = model.transcribe(
             local_audio,
-            language=source_language,
+            language="ar",
             beam_size=8,
             vad_filter=True,
             condition_on_previous_text=True
         )
 
-        english_segments = []
+        arabic_segments = []
 
         for segment in whisper_segments:
-            english_segments.append({
+            arabic_segments.append({
                 "start": segment.start,
                 "end": segment.end,
                 "text": segment.text.strip()
             })
 
-        print(f"[JOB {video_id}] English segments created: {len(english_segments)}", flush=True)
+        print(
+            f"[JOB {video_id}] Arabic segments created: {len(arabic_segments)}",
+            flush=True
+        )
 
-        arabic_segments = []
+        english_segments = []
 
-        print(f"[JOB {video_id}] Translating English subtitles to Arabic", flush=True)
+        print(
+            f"[JOB {video_id}] Translating Arabic subtitles to English",
+            flush=True
+        )
 
-        for segment in english_segments:
-            arabic_segments.append({
+        for segment in arabic_segments:
+            translated_text = translate_text(
+                segment["text"],
+                "ar",
+                "en"
+            )
+
+            english_segments.append({
                 "start": segment["start"],
                 "end": segment["end"],
-                "text": translate_text(segment["text"], "en", "ar")
+                "text": translated_text
             })
 
         print(f"[JOB {video_id}] Writing VTT files", flush=True)
 
-        write_vtt(english_segments, english_vtt)
         write_vtt(arabic_segments, arabic_vtt, rtl=True)
+        write_vtt(english_segments, english_vtt)
 
-        subtitle_en_gcs_path = f"subtitles/{video_id}/subtitles_en.vtt"
         subtitle_ar_gcs_path = f"subtitles/{video_id}/subtitles_ar.vtt"
+        subtitle_en_gcs_path = f"subtitles/{video_id}/subtitles_en.vtt"
 
-        print(f"[JOB {video_id}] Uploading English VTT to GCS: {subtitle_en_gcs_path}", flush=True)
-        upload_to_gcs(english_vtt, subtitle_en_gcs_path)
+        print(
+            f"[JOB {video_id}] Uploading Arabic VTT to GCS: {subtitle_ar_gcs_path}",
+            flush=True
+        )
 
-        print(f"[JOB {video_id}] Uploading Arabic VTT to GCS: {subtitle_ar_gcs_path}", flush=True)
         upload_to_gcs(arabic_vtt, subtitle_ar_gcs_path)
+
+        print(
+            f"[JOB {video_id}] Uploading English VTT to GCS: {subtitle_en_gcs_path}",
+            flush=True
+        )
+
+        upload_to_gcs(english_vtt, subtitle_en_gcs_path)
 
         payload = {
             "video_id": video_id,
@@ -228,28 +267,56 @@ def process_video(
 
         if callback_url:
             print(f"[JOB {video_id}] Sending callback to Laravel", flush=True)
-            response = requests.post(callback_url, json=payload, timeout=30)
 
-        print(f"[JOB {video_id}] Callback URL: {callback_url}", flush=True)
-        print(f"[JOB {video_id}] Callback status: {response.status_code}", flush=True)
-        print(f"[JOB {video_id}] Callback response: {response.text}", flush=True)
+            response = requests.post(
+                callback_url,
+                json=payload,
+                timeout=30
+            )
 
-        print(f"[JOB {video_id}] Subtitle job completed successfully", flush=True)
+            print(
+                f"[JOB {video_id}] Callback status: {response.status_code}",
+                flush=True
+            )
+
+            print(
+                f"[JOB {video_id}] Callback response: {response.text}",
+                flush=True
+            )
+
+        print(
+            f"[JOB {video_id}] Subtitle job completed successfully",
+            flush=True
+        )
 
     except Exception as error:
         print(f"[JOB {video_id}] ERROR: {str(error)}", flush=True)
 
         if callback_url:
-            requests.post(callback_url, json={
-                "video_id": video_id,
-                "status": "failed",
-                "error": str(error)
-            }, timeout=30)
+            try:
+                requests.post(
+                    callback_url,
+                    json={
+                        "video_id": video_id,
+                        "status": "failed",
+                        "error": str(error)
+                    },
+                    timeout=30
+                )
+            except Exception as callback_error:
+                print(
+                    f"[JOB {video_id}] Callback failed: {str(callback_error)}",
+                    flush=True
+                )
 
     finally:
         if work_dir.exists():
             shutil.rmtree(work_dir)
-            print(f"[JOB {video_id}] Temporary files cleaned", flush=True)
+
+            print(
+                f"[JOB {video_id}] Temporary files cleaned",
+                flush=True
+            )
 
 
 @app.post("/generate-subtitles")
