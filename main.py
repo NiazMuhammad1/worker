@@ -15,7 +15,8 @@ from faster_whisper import WhisperModel
 import argostranslate.package
 import argostranslate.translate
 
-
+model = None
+job_lock = threading.Lock()
 load_dotenv()
 
 API_KEY = os.getenv("WORKER_API_KEY")
@@ -234,135 +235,197 @@ def process_video(
     callback_url: Optional[str],
     source_language: Optional[str] = None
 ):
-    print("PROCESS VIDEO FUNCTION STARTED", flush=True)
 
-    global model
+    # =========================================================
+    # PREVENT MULTIPLE WHISPER JOBS
+    # =========================================================
 
-    if model is None:
-        print(f"[JOB {video_id}] Loading Whisper model: {WHISPER_MODEL}", flush=True)
+    if not job_lock.acquire(blocking=False):
 
-        model = WhisperModel(
-            WHISPER_MODEL,
-            device=WHISPER_DEVICE,
-            compute_type=WHISPER_COMPUTE_TYPE
-        )
-
-        print(f"[JOB {video_id}] Whisper model loaded", flush=True)
-
-    job_uuid = str(uuid.uuid4())
-    work_dir = Path("tmp") / job_uuid
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    local_video = str(work_dir / "video.mp4")
-    local_audio = str(work_dir / "audio.wav")
-    english_vtt = str(work_dir / "subtitles_en.vtt")
-    arabic_vtt = str(work_dir / "subtitles_ar.vtt")
-
-    try:
-        print(f"[JOB {video_id}] Downloading video from GCS: {gcs_video_path}", flush=True)
-        download_from_gcs(gcs_video_path, local_video)
-
-        print(f"[JOB {video_id}] Extracting audio with FFmpeg", flush=True)
-        extract_audio(local_video, local_audio)
-
-        print(f"[JOB {video_id}] Running Whisper original transcription", flush=True)
-
-        original_segments, detected_language = run_whisper_transcription(
-            local_audio,
-            language=source_language,
-            task="transcribe"
-        )
-
-        detected_language = source_language or detected_language
-
-        print(f"[JOB {video_id}] Detected/source language: {detected_language}", flush=True)
-        print(f"[JOB {video_id}] Original segments created: {len(original_segments)}", flush=True)
-
-        english_segments = []
-        arabic_segments = []
-
-        # Non-English videos:
-        # Whisper creates original language subtitles
-        # Whisper also translates speech directly to English
-        if detected_language != "en":
-            print(f"[JOB {video_id}] Non-English video detected", flush=True)
-
-            if detected_language == "ar":
-                arabic_segments = original_segments
-            else:
-                # If Urdu/Hindi/etc, we still store original text in Arabic track slot for now.
-                # Better later: add subtitle_original_path if you want separate Urdu/Hindi tracks.
-                arabic_segments = original_segments
-
-            print(f"[JOB {video_id}] Running Whisper English translation", flush=True)
-
-            english_segments, _ = run_whisper_transcription(
-                local_audio,
-                language=detected_language,
-                task="translate"
-            )
-
-        # English videos:
-        # Whisper creates English subtitles
-        # Argos creates Arabic subtitles
-        else:
-            print(f"[JOB {video_id}] English video detected", flush=True)
-
-            english_segments = original_segments
-
-            print(f"[JOB {video_id}] Installing Argos EN -> AR package", flush=True)
-            install_argos_language_package("en", "ar")
-
-            print(f"[JOB {video_id}] Translating English subtitles to Arabic using Argos", flush=True)
-
-            for segment in english_segments:
-                arabic_segments.append({
-                    "start": segment["start"],
-                    "end": segment["end"],
-                    "text": translate_text(segment["text"], "en", "ar")
-                })
-
-        print(f"[JOB {video_id}] Writing VTT files", flush=True)
-
-        write_vtt(english_segments, english_vtt)
-        write_vtt(arabic_segments, arabic_vtt, rtl=True)
-
-        subtitle_en_gcs_path = f"subtitles/{video_id}/subtitles_en.vtt"
-        subtitle_ar_gcs_path = f"subtitles/{video_id}/subtitles_ar.vtt"
-
-        print(f"[JOB {video_id}] Uploading English VTT to GCS: {subtitle_en_gcs_path}", flush=True)
-        upload_to_gcs(english_vtt, subtitle_en_gcs_path)
-
-        print(f"[JOB {video_id}] Uploading Arabic/original VTT to GCS: {subtitle_ar_gcs_path}", flush=True)
-        upload_to_gcs(arabic_vtt, subtitle_ar_gcs_path)
-
-        payload = {
-            "video_id": video_id,
-            "status": "completed",
-            "subtitle_en_path": subtitle_en_gcs_path,
-            "subtitle_ar_path": subtitle_ar_gcs_path,
-            "detected_language": detected_language
-        }
-
-        send_callback(callback_url, payload, video_id)
-
-        print(f"[JOB {video_id}] Subtitle job completed successfully", flush=True)
-
-    except Exception as error:
-        print(f"[JOB {video_id}] ERROR: {str(error)}", flush=True)
+        print(f"[JOB {video_id}] Worker busy. Another subtitle job is running.", flush=True)
 
         fail_payload = {
             "video_id": video_id,
             "status": "failed",
-            "error": str(error)
+            "error": "Subtitle worker busy. Please retry later."
         }
 
         send_callback(callback_url, fail_payload, video_id)
 
+        return
+
+    try:
+
+        print("PROCESS VIDEO FUNCTION STARTED", flush=True)
+
+        global model
+
+        if model is None:
+
+            print(f"[JOB {video_id}] Loading Whisper model: {WHISPER_MODEL}", flush=True)
+
+            model = WhisperModel(
+                WHISPER_MODEL,
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE_TYPE
+            )
+
+            print(f"[JOB {video_id}] Whisper model loaded", flush=True)
+
+        job_uuid = str(uuid.uuid4())
+
+        work_dir = Path("tmp") / job_uuid
+
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        local_video = str(work_dir / "video.mp4")
+        local_audio = str(work_dir / "audio.wav")
+
+        english_vtt = str(work_dir / "subtitles_en.vtt")
+        arabic_vtt = str(work_dir / "subtitles_ar.vtt")
+
+        try:
+
+            print(f"[JOB {video_id}] Downloading video from GCS: {gcs_video_path}", flush=True)
+
+            download_from_gcs(gcs_video_path, local_video)
+
+            print(f"[JOB {video_id}] Extracting audio with FFmpeg", flush=True)
+
+            extract_audio(local_video, local_audio)
+
+            print(f"[JOB {video_id}] Running Whisper original transcription", flush=True)
+
+            original_segments, detected_language = run_whisper_transcription(
+                local_audio,
+                language=source_language,
+                task="transcribe"
+            )
+
+            detected_language = source_language or detected_language
+
+            print(f"[JOB {video_id}] Detected/source language: {detected_language}", flush=True)
+
+            print(f"[JOB {video_id}] Original segments created: {len(original_segments)}", flush=True)
+
+            english_segments = []
+            arabic_segments = []
+
+            # =========================================================
+            # NON-ENGLISH VIDEOS
+            # =========================================================
+
+            if detected_language != "en":
+
+                print(f"[JOB {video_id}] Non-English video detected", flush=True)
+
+                arabic_segments = original_segments
+
+                print(f"[JOB {video_id}] Running Whisper English translation", flush=True)
+
+                english_segments, _ = run_whisper_transcription(
+                    local_audio,
+                    language=detected_language,
+                    task="translate"
+                )
+
+            # =========================================================
+            # ENGLISH VIDEOS
+            # =========================================================
+
+            else:
+
+                print(f"[JOB {video_id}] English video detected", flush=True)
+
+                english_segments = original_segments
+
+                print(f"[JOB {video_id}] Installing Argos EN -> AR package", flush=True)
+
+                install_argos_language_package("en", "ar")
+
+                print(f"[JOB {video_id}] Translating English subtitles to Arabic using Argos", flush=True)
+
+                for segment in english_segments:
+
+                    arabic_segments.append({
+                        "start": segment["start"],
+                        "end": segment["end"],
+                        "text": translate_text(
+                            segment["text"],
+                            "en",
+                            "ar"
+                        )
+                    })
+
+            print(f"[JOB {video_id}] Writing VTT files", flush=True)
+
+            write_vtt(english_segments, english_vtt)
+
+            write_vtt(
+                arabic_segments,
+                arabic_vtt,
+                rtl=True
+            )
+
+            subtitle_en_gcs_path = f"subtitles/{video_id}/subtitles_en.vtt"
+
+            subtitle_ar_gcs_path = f"subtitles/{video_id}/subtitles_ar.vtt"
+
+            print(f"[JOB {video_id}] Uploading English VTT to GCS", flush=True)
+
+            upload_to_gcs(
+                english_vtt,
+                subtitle_en_gcs_path
+            )
+
+            print(f"[JOB {video_id}] Uploading Arabic/original VTT to GCS", flush=True)
+
+            upload_to_gcs(
+                arabic_vtt,
+                subtitle_ar_gcs_path
+            )
+
+            payload = {
+                "video_id": video_id,
+                "status": "completed",
+                "subtitle_en_path": subtitle_en_gcs_path,
+                "subtitle_ar_path": subtitle_ar_gcs_path,
+                "detected_language": detected_language
+            }
+
+            send_callback(callback_url, payload, video_id)
+
+            print(f"[JOB {video_id}] Subtitle job completed successfully", flush=True)
+
+        except Exception as error:
+
+            print(f"[JOB {video_id}] ERROR: {str(error)}", flush=True)
+
+            fail_payload = {
+                "video_id": video_id,
+                "status": "failed",
+                "error": str(error)
+            }
+
+            send_callback(callback_url, fail_payload, video_id)
+
+        finally:
+
+            if work_dir.exists():
+
+                shutil.rmtree(work_dir)
+
+                print(f"[JOB {video_id}] Temporary files cleaned", flush=True)
+
     finally:
-        if work_dir.exists():
-            shutil.rmtree(work_dir)
-            print(f"[JOB {video_id}] Temporary files cleaned", flush=True)
+
+        # =========================================================
+        # RELEASE LOCK
+        # =========================================================
+
+        job_lock.release()
+
+        print(f"[JOB {video_id}] Worker lock released", flush=True)
 
 
 @app.post("/generate-subtitles")
