@@ -15,7 +15,6 @@ from faster_whisper import WhisperModel
 import argostranslate.package
 import argostranslate.translate
 
-
 load_dotenv()
 
 API_KEY = os.getenv("WORKER_API_KEY")
