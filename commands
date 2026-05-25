@@ -40,6 +40,7 @@ sudo systemctl restart lms-subtitle-worker
 sudo journalctl -u lms-subtitle-worker -f
 
 
+sudo dmesg -T | grep -i "killed process"
 
 
 curl -X POST "https://worker.abdullah-alanazi.sa/generate-subtitles" ^
