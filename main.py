@@ -157,7 +157,7 @@ def run_whisper_transcription(
     task: str = "transcribe"
 ):
     options = {
-        "beam_size": 8,
+        "beam_size": 5,
         "vad_filter": True,
         "condition_on_previous_text": True,
         "task": task,
